@@ -19,17 +19,17 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "main": "./lib/index.js",
+  "main": "./build-out/lib/index.js",
   "exports": {
-    ".": "./lib/index.js",
-    "./client": "./client/client.js",
+    ".": "./build-out/lib/index.js",
+    "./client": "./build-out/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./locale/en.json": "./locale/en.json",
     "./locale/zh.json": "./locale/zh.json"
   },
   "files": [
-    "lib",
+    "build-out",
     "client",
     "cordis.patch.yml",
     "locale/*.json",
@@ -38,7 +38,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "prepare": "node build.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.24.0"

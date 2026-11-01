@@ -1,0 +1,6 @@
+url: https://github.com/jamen-jiang/dsh-qoder-worktree
+name: jamen-jiang/dsh-qoder-worktree
+category: git
+description:
+  en: Qoder-style workspace mode and branch indicator; creates a dedicated git worktree per task and switches between them with one click.
+  zh: Qoder 风格的工作区模式与分支指示器，为每个 Git 仓库按任务创建独立 worktree 并一键切换。

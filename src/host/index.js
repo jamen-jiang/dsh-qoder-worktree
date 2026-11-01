@@ -8,10 +8,11 @@
  */
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 const API_PREFIX = '/api/dsh-qoder-worktree'
-const ENDPOINTS = ['status', 'create', 'remove']
+const ENDPOINTS = ['status', 'create', 'remove', 'branches', 'fetch', 'branch']
 const BRANCH_PREFIX = 'qwt'
 
 const ok = (value) => ({ ok: true, value })
@@ -84,7 +85,9 @@ async function repoStatus(cwd) {
   const commits = count.ok ? Number(count.stdout) || 0 : 0
   const list = await git(cwd, ['worktree', 'list', '--porcelain'])
   const worktrees = list.ok ? parseWorktrees(list.stdout) : []
-  return { repo: true, branch, commits, worktrees, mainToplevel }
+  const porcelain = await git(cwd, ['status', '--porcelain'])
+  const changes = porcelain.ok ? porcelain.stdout.split('\n').filter((line) => line.trim()).length : 0
+  return { repo: true, branch, commits, changes, worktrees, mainToplevel }
 }
 
 async function createWorktree(cwd, name) {
@@ -95,7 +98,7 @@ async function createWorktree(cwd, name) {
   if (!status.repo || !status.mainToplevel) throw new Error('当前目录不是本机 Git 仓库工作树。')
   if (status.commits <= 0) throw new Error('仓库还没有提交，无法创建 Worktree。')
   const repoName = basename(status.mainToplevel)
-  const worktreePath = join(dirname(status.mainToplevel), `${repoName}-wt`, name)
+  const worktreePath = join(homedir(), '.dsh', 'Worktrees', repoName, name)
   if (existsSync(worktreePath)) throw new Error(`目录已存在：${worktreePath}`)
   const branch = `${BRANCH_PREFIX}/${name}`
   const branchExists = await git(status.mainToplevel, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
@@ -119,10 +122,68 @@ async function removeWorktree(cwd, target) {
   return { path: entry.path }
 }
 
+async function listBranches(cwd) {
+  const status = await repoStatus(cwd)
+  if (!status.repo || !status.mainToplevel) throw new Error('当前目录不是本机 Git 仓库工作树。')
+  const local = await git(status.mainToplevel, ['for-each-ref', 'refs/heads', '--format=%(refname:lstrip=2)'])
+  const remote = await git(status.mainToplevel, ['for-each-ref', 'refs/remotes', '--format=%(refname:lstrip=2)'])
+  const split = (out) => out.ok && out.stdout ? out.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : []
+  return {
+    local: split(local),
+    remote: split(remote).filter((ref) => !ref.endsWith('/HEAD')),
+    current: status.branch,
+    worktrees: status.worktrees,
+    mainToplevel: status.mainToplevel,
+  }
+}
+
+async function fetchBranches(cwd) {
+  const status = await repoStatus(cwd)
+  if (!status.repo || !status.mainToplevel) throw new Error('当前目录不是本机 Git 仓库工作树。')
+  const fetched = await git(status.mainToplevel, ['fetch', '--all', '--prune'], 120000)
+  if (!fetched.ok) throw new Error(fetched.message)
+  return { fetched: true }
+}
+
+/** Create a worktree checked out at the given branch (local) or tracking it (remote like origin/xxx). */
+async function createWorktreeFromBranch(cwd, ref) {
+  if (typeof ref !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(ref) || ref.includes('..') || ref.endsWith('/')) {
+    throw new Error('分支名不合法。')
+  }
+  const status = await repoStatus(cwd)
+  if (!status.repo || !status.mainToplevel) throw new Error('当前目录不是本机 Git 仓库工作树。')
+  if (status.commits <= 0) throw new Error('仓库还没有提交，无法创建 Worktree。')
+  const localExists = await git(status.mainToplevel, ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`])
+  // 当前分支已被主树 checkout 时 git 拒绝同一分支挂在两个工作树,改用 --detach(目录名带短 sha,Qoder 风格)。
+  const detached = localExists.ok && status.branch === ref
+  let dirName = (localExists.ok ? ref : ref.replace(/^[^/]+\//, '')).split('/').join('-')
+  if (detached) {
+    const sha = await git(status.mainToplevel, ['rev-parse', '--short', 'HEAD'])
+    if (sha.ok && sha.stdout) dirName = `${dirName}-${sha.stdout}`
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,39}$/.test(dirName)) throw new Error(`无法从分支派生任务空间名称：${ref}`)
+  const repoName = basename(status.mainToplevel)
+  const worktreePath = join(homedir(), '.dsh', 'Worktrees', repoName, dirName)
+  const shortName = ref.includes('/') ? ref.slice(ref.indexOf('/') + 1) : ref
+  if (existsSync(worktreePath)) {
+    // 目录已存在(此前创建过):幂等返回,客户端直接打开这个 worktree。
+    return { path: worktreePath, branch: detached ? undefined : (localExists.ok ? ref : shortName), name: dirName }
+  }
+  const args = localExists.ok
+    ? (detached ? ['worktree', 'add', worktreePath, '--detach', ref] : ['worktree', 'add', worktreePath, ref])
+    : ['worktree', 'add', worktreePath, '--track', '-b', shortName, ref]
+  const added = await git(status.mainToplevel, args, 60000)
+  if (!added.ok) throw new Error(added.message)
+  return { path: worktreePath, branch: detached ? undefined : (localExists.ok ? ref : shortName), name: dirName }
+}
+
 async function handle(endpoint, payload) {
   if (endpoint === 'status') return ok(await repoStatus(String(payload.cwd ?? '')))
   if (endpoint === 'create') return ok(await createWorktree(String(payload.cwd ?? ''), payload.name))
   if (endpoint === 'remove') return ok(await removeWorktree(String(payload.cwd ?? ''), payload.path))
+  if (endpoint === 'branches') return ok(await listBranches(String(payload.cwd ?? '')))
+  if (endpoint === 'fetch') return ok(await fetchBranches(String(payload.cwd ?? '')))
+  if (endpoint === 'branch') return ok(await createWorktreeFromBranch(String(payload.cwd ?? ''), payload.ref))
   return fail(`Unknown endpoint: ${endpoint}`)
 }
 

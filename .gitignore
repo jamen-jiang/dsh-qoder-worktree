@@ -1,5 +1,11 @@
 node_modules/
 .npm-cache/
 dist/
+build-out/
 .DS_Store
 .idea/
+_asar-tmp/
+_build.sh
+_build-cli.mjs
+_build-host.mjs
+_acl-recovery/

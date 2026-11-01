@@ -4,18 +4,18 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const root = dirname(fileURLToPath(import.meta.url))
+const out = resolve(root, "build-out")
 const minify = !process.argv.includes("--no-minify")
 const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"))
 const moduleId = packageJson.name
 
-mkdirSync(resolve(root, "dist"), { recursive: true })
-mkdirSync(resolve(root, "lib"), { recursive: true })
-mkdirSync(resolve(root, "client"), { recursive: true })
+mkdirSync(out, { recursive: true })
+mkdirSync(resolve(out, "lib"), { recursive: true })
 
 await esbuild.build({
   entryPoints: [resolve(root, "src/client/entry.tsx")],
   bundle: true,
-  outfile: resolve(root, "dist/client.cjs"),
+  outfile: resolve(out, "client.cjs"),
   format: "cjs",
   platform: "browser",
   jsx: "automatic",
@@ -34,7 +34,7 @@ await esbuild.build({
   }],
 })
 
-const app = readFileSync(resolve(root, "dist/client.cjs"), "utf8")
+const app = readFileSync(resolve(out, "client.cjs"), "utf8")
 const wrapped = [
   "window.__ModuleLoader__.load({",
   `  id: ${JSON.stringify(moduleId)},`,
@@ -46,12 +46,12 @@ const wrapped = [
   "  },",
   "})",
 ].join("\n")
-writeFileSync(resolve(root, "client/client.js"), wrapped)
+writeFileSync(resolve(out, "client.js"), wrapped)
 
 await esbuild.build({
   entryPoints: [resolve(root, "src/host/index.js")],
   bundle: true,
-  outfile: resolve(root, "lib/index.js"),
+  outfile: resolve(out, "lib/index.js"),
   format: "esm",
   platform: "node",
   target: ["node20"],
