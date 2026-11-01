@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Qoder Worktree",
+    "description": "Qoder 风格的 本地模式 / Worktree 模式 与分支指示器；按任务创建 git worktree 并一键切换。"
+  }
+}

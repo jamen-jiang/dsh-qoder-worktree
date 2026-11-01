@@ -1,0 +1,21 @@
+.qwt-row{display:inline-flex;align-items:center;gap:2px;margin-left:4px}
+.qwt-chip{position:relative;display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:6px;font-size:12px;color:var(--dsw-alias-text-secondary,#9a9a9a);cursor:pointer;user-select:none;white-space:nowrap}
+.qwt-chip:hover{background:var(--dsw-alias-fill-secondary,rgba(255,255,255,.08))}
+.qwt-menu{position:absolute;top:28px;left:0;z-index:1000;width:280px;padding:4px;background:var(--dsw-alias-surface-raised,#26262b);border:1px solid var(--dsw-alias-stroke,rgba(255,255,255,.12));border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);text-align:left}
+.qwt-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;font-size:12px;color:var(--dsw-alias-text-primary,#e6e6e6);cursor:pointer}
+.qwt-item:hover{background:var(--dsw-alias-fill-secondary,rgba(255,255,255,.08))}
+.qwt-item[data-disabled="true"]{opacity:.45;cursor:not-allowed}
+.qwt-item[data-disabled="true"]:hover{background:transparent}
+.qwt-item[data-active="true"]::after{content:"✓";margin-left:auto}
+.qwt-item .qwt-sub{margin-left:auto;font-size:10px;opacity:.6;max-width:120px;overflow:hidden;text-overflow:ellipsis}
+.qwt-divider{height:1px;margin:4px 6px;background:var(--dsw-alias-stroke,rgba(255,255,255,.12))}
+.qwt-create{display:flex;gap:6px;padding:6px 8px 4px}
+.qwt-create input{flex:1;min-width:0;height:26px;padding:0 8px;border-radius:6px;border:1px solid var(--dsw-alias-stroke,rgba(255,255,255,.18));background:var(--dsw-alias-surface,#1c1c20);color:var(--dsw-alias-text-primary,#e6e6e6);font-size:12px;outline:none}
+.qwt-create button{height:26px;padding:0 10px;border-radius:6px;border:none;background:#247bbf;color:#fff;font-size:12px;cursor:pointer}
+.qwt-create button:disabled{opacity:.45;cursor:not-allowed}
+.qwt-remove{margin-left:auto;font-size:10px;opacity:.55;cursor:pointer}
+.qwt-remove:hover{opacity:1;color:#e5726f}
+.qwt-branch{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:6px;font-size:12px;color:var(--dsw-alias-text-secondary,#9a9a9a);user-select:none;white-space:nowrap;cursor:default}
+.qwt-caret{font-size:10px;opacity:.7}
+.qwt-error{padding:4px 8px 6px;font-size:11px;color:#e5726f;word-break:break-all}
+.qwt-empty{padding:4px 8px 6px;font-size:11px;opacity:.6}

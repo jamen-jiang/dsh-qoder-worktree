@@ -1,0 +1,61 @@
+{
+  "name": "dsh-qoder-worktree",
+  "version": "0.1.0",
+  "description": "Qoder 风格的工作区模式与分支指示器：在会话控制行显示 本地模式 / Worktree 模式 与当前分支，Worktree 模式为每个 Git 仓库按任务创建独立 worktree 并一键切换。Qoder-style workspace mode & branch indicator for DeepSeek Harness.",
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamen-jiang/dsh-qoder-worktree.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "git",
+    "worktree"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots",
+        "connection",
+        "workspaces",
+        "uiWorkspace",
+        "sessions"
+      ],
+      "platform": "web"
+    }
+  }
+}

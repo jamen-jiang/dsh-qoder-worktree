@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Qoder Worktree",
+    "description": "Qoder-style workspace mode (Local / Worktree) and git branch indicator; creates per-task git worktrees and switches between them."
+  }
+}
