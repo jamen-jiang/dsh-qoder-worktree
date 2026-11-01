@@ -126,6 +126,8 @@ async function handle(endpoint, payload) {
   return fail(`Unknown endpoint: ${endpoint}`)
 }
 
+export const inject = ['connection']
+
 export function apply(ctx) {
   for (const endpoint of ENDPOINTS) {
     ctx.effect(() => ctx.connection.fetch.register({
