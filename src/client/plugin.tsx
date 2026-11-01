@@ -136,7 +136,7 @@ function ModeChip(props: {
 
   return (
     <div ref={ref} className="qwt-chip" onClick={() => { setError(undefined); setMenuOpen((v) => !v) }}>
-      <span>meln</span>
+      <span className="qwt-glyph">◫</span>
       <span>{inWorktree ? "Worktree 模式" : "本地模式"}</span>
       <span className="qwt-caret">▾</span>
       {menuOpen && (
@@ -147,7 +147,7 @@ function ModeChip(props: {
             title={repo && status?.mainToplevel ? status.mainToplevel : undefined}
             onClick={() => (inWorktree ? void openPath(status?.mainToplevel) : setMenuOpen(false))}
           >
-            <span>mnt</span>
+            <span className="qwt-glyph">◫</span>
             <span>本地模式</span>
             {repo && status?.mainToplevel ? <span className="qwt-sub">{basename(status.mainToplevel)}</span> : undefined}
           </div>
@@ -160,7 +160,7 @@ function ModeChip(props: {
                 title={item.path}
                 onClick={() => (samePath(item.path, cwd) ? setMenuOpen(false) : void openPath(item.path))}
               >
-                <span>br</span>
+                <span className="qwt-glyph">⑂</span>
                 <span>{basename(item.path)}</span>
                 <span className="qwt-sub">{item.branch ?? "detached"}</span>
                 <span
@@ -187,7 +187,7 @@ function ModeChip(props: {
               title={WORKTREE_HINT}
               onClick={(event) => event.stopPropagation()}
             >
-              <span>br</span>
+              <span className="qwt-glyph">⑂</span>
               <span>Worktree 模式</span>
             </div>
           )}
@@ -220,7 +220,7 @@ function BranchChip(props: { status?: Status, cwd?: string }) {
   const label = status?.repo && status.branch ? status.branch : NO_BRANCH
   return (
     <div className="qwt-branch" title={cwd ?? NO_BRANCH}>
-      <span>br</span>
+      <span className="qwt-glyph">⑂</span>
       <span>{label}</span>
     </div>
   )
