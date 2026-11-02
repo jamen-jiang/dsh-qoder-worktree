@@ -9,3 +9,6 @@ _build.sh
 _build-cli.mjs
 _build-host.mjs
 _acl-recovery/
+.pnpm-store/
+.tmp/
+NUL

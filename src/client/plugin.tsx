@@ -14,6 +14,12 @@ type Status = {
   changes?: number
   worktrees: Array<{ path: string, branch?: string, main: boolean }>
   mainToplevel?: string
+  // 会话的生效目录(Host 按 working-directory 投影/登记表算);undefined = 从未切换过(= 工作区根)。
+  workingPath?: string
+  // 待发送意图:切了模式/选了分支但还没发消息,Host 在首条消息进 inbox 时才建 worktree 并切目录。
+  arm?: { mode: "local" | "worktree", ref?: string, newBranch?: string, carry?: boolean, error?: string } | null
+  // 当前生效目录当初是不是"带未提交改动"开的任务空间(Host spaces.json 档案)。
+  carryWorking?: boolean
 }
 
 type Branches = {
@@ -29,8 +35,6 @@ type Connection = { rpc: { call: (...args: unknown[]) => Promise<any> } }
 type ClientContext = {
   effect: (fn: () => () => void, label?: string) => void
   connection: Connection
-  workspaces: { create: (input: { path: string }) => Promise<{ workspaceId: string }> }
-  uiWorkspace: { openWorkspace: (workspaceId: string) => Promise<void> }
   slots: {
     inject: (name: string, factory: () => { unregister: () => void } | undefined) => () => void
     register: (options: Record<string, unknown>, component: unknown) => { unregister: () => void }
@@ -44,12 +48,19 @@ function createApi(connection: Connection) {
     return result.value
   }
   return {
-    status: (cwd: string) => call("status", { cwd }) as Promise<Status>,
+    status: (cwd: string, sessionId?: string) => call("status", { cwd, sessionId: sessionId ?? "" }) as Promise<Status>,
     branches: (cwd: string) => call("branches", { cwd }) as Promise<Branches>,
     fetch: (cwd: string) => call("fetch", { cwd }),
     branch: (cwd: string, ref: string) => call("branch", { cwd, ref }),
+    newBranch: (cwd: string, name: string) => call("new-branch", { cwd, name }),
     create: (cwd: string, name: string) => call("create", { cwd, name }),
     remove: (cwd: string, path: string) => call("remove", { cwd, path }),
+    // 当前会话原地指向 path(worktree/主树):不建工作区、不切会话,草稿留在输入框里。
+    use: (sessionId: string, path: string) => call("use", { sessionId, path }),
+    // 登记待发送意图:切模式/选分支只 arm,Host 在首条消息进 inbox 时才建 worktree 并切目录。
+    arm: (sessionId: string, payload: { cwd: string, mode: "local" | "worktree", ref?: string, newBranch?: string }) =>
+      call("arm", { sessionId, ...payload }),
+    armCancel: (sessionId: string) => call("arm-cancel", { sessionId }),
   }
 }
 
@@ -59,6 +70,18 @@ function samePath(a?: string, b?: string) {
   // 浏览器客户端没有 process,用路径本身识别 Windows(盘符或反斜杠)。
   const windows = /^[A-Za-z]:[\\/]/.test(a) || /^[A-Za-z]:[\\/]/.test(b)
   return windows ? norm(a) === norm(b) : a === b
+}
+
+/** 会话生效目录:workingPath 优先(可能已指向别的 worktree),没切过就是工作区根。 */
+function effectiveDir(status: Status | undefined, cwd?: string) {
+  return status?.workingPath ?? cwd
+}
+
+/** 生效目录命中的非主 worktree 条目;本地模式为 undefined。 */
+function worktreeOf(status: Status | undefined, cwd?: string) {
+  const dir = effectiveDir(status, cwd)
+  if (!dir) return undefined
+  return status?.worktrees.find((item) => !item.main && samePath(item.path, dir))
 }
 
 function installStyles() {
@@ -78,6 +101,21 @@ function IconBranch() {
       <circle cx="6.5" cy="18" r="2.4" />
       <line x1="6.5" y1="8.4" x2="6.5" y2="15.6" />
       <path d="M17.5 8.4 C17.5 12, 12.5 13, 6.5 13" />
+    </svg>
+  )
+}
+
+function IconWorktree() {
+  // 主树 + 派生工作树:左侧一条分支线串两个节点,右侧小节点 + 齿轮节点。
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <line x1="6" y1="7.2" x2="6" y2="16.8" />
+      <circle cx="17" cy="6" r="1.8" />
+      <circle cx="17" cy="16.5" r="4.2" />
+      <line x1="17" y1="14.1" x2="17" y2="18.9" />
+      <line x1="14.6" y1="16.5" x2="19.4" y2="16.5" />
     </svg>
   )
 }
@@ -110,8 +148,39 @@ function IconCheck() {
 
 function IconX() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  )
+}
+
+// 分支列表也缓存:宿主 listBranches 要跑好几个 git 子进程,菜单打开时现拉会先空后有。
+// chip 挂载/悬停就预取,菜单先画缓存再后台刷新。
+const branchesCache = new Map<string, Branches>()
+const branchesInflight = new Map<string, Promise<Branches>>()
+
+function loadBranches(api: ReturnType<typeof createApi>, cwd: string | undefined, force = false) {
+  if (!cwd) return undefined
+  const cached = branchesCache.get(cwd)
+  if (cached && !force) return Promise.resolve(cached)
+  const running = branchesInflight.get(cwd)
+  if (running) return running
+  const request = api.branches(cwd).then((next) => {
+    branchesCache.set(cwd, next)
+    branchesInflight.delete(cwd)
+    return next
+  }, (error: unknown) => {
+    branchesInflight.delete(cwd)
+    throw error
+  })
+  branchesInflight.set(cwd, request)
+  return request
+}
+
+function IconPlus() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
     </svg>
   )
 }
@@ -123,47 +192,50 @@ function basename(path?: string) {
   return at === -1 ? trimmed : trimmed.slice(at + 1)
 }
 
-type OpenActions = {
-  workspacesCreate: (path: string) => Promise<{ workspaceId: string }>
-  openWorkspace: (workspaceId: string) => Promise<void>
-}
-
-// 「Worktree 模式」只是标记,不马上建工作区;等用户真正发送消息时由 SessionBar 创建并跳转。
-const pendingWorktree: { cwd?: string } = {}
-
 function BranchMenu(props: {
   api: ReturnType<typeof createApi>
-  open: OpenActions
+  sessionId?: string
   status?: Status
   cwd?: string
-  onBack?: () => void
+  onArm: () => void
   onClose: () => void
 }) {
-  const { api, open, status, cwd, onBack, onClose } = props
+  const { api, sessionId, status, cwd, onArm, onClose } = props
   const [query, setQuery] = useState("")
-  const [branches, setBranches] = useState<Branches | undefined>(undefined)
+  const [branches, setBranches] = useState<Branches | undefined>(() => (cwd ? branchesCache.get(cwd) : undefined))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState("")
   const searchRef = useRef<HTMLInputElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const newRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     searchRef.current?.focus()
   }, [])
 
-  const loadBranches = useCallback(() => {
-    if (!cwd) return
+  useEffect(() => {
+    if (creating) newRef.current?.focus()
+  }, [creating])
+
+  useEffect(() => {
+    if (!cwd) return undefined
     let alive = true
-    api.branches(cwd)
-      .then((next) => { if (alive) setBranches(next) })
+    // 缓存先画,后台强刷一次覆盖。
+    const cached = branchesCache.get(cwd)
+    if (cached) setBranches(cached)
+    loadBranches(api, cwd, true)
+      ?.then((next) => { if (alive) setBranches(next) })
       .catch(() => { /* 菜单保持已加载内容 */ })
     return () => { alive = false }
   }, [api, cwd])
 
-  useEffect(() => loadBranches(), [loadBranches])
-
   const repo = status?.repo === true
-  const inWorktree = status?.worktrees.some((item) => !item.main && samePath(item.path, cwd)) === true
+  const inWorktree = worktreeOf(status, cwd) !== undefined
+  // 乐观模式:arm 登记了意图但还没落地(未发消息)时,芯片按 arm 显示。
+  const armed = status?.arm?.mode
+  const worktreeMode = armed === "worktree" ? true : armed === "local" ? false : inWorktree
   const needle = query.trim().toLowerCase()
   const locals = (branches?.local ?? []).filter((name) => !needle || name.toLowerCase().includes(needle))
 
@@ -182,13 +254,13 @@ function BranchMenu(props: {
     return () => list.removeEventListener("scroll", onScroll)
   }, [repo, needle === ""])
 
-  async function openPath(path: string | undefined) {
-    if (!path) return
+  async function arm(mode: "local" | "worktree", extra?: { ref?: string, newBranch?: string, carry?: boolean }) {
+    if (!cwd || !sessionId || busy) return
     setError(undefined)
     setBusy(true)
     try {
-      const workspace = await open.workspacesCreate(path)
-      await open.openWorkspace(workspace.workspaceId)
+      await api.arm(sessionId, { cwd, mode, ...extra })
+      onArm()
       onClose()
     } catch (cause) {
       setError(String((cause as Error).message ?? cause))
@@ -197,30 +269,31 @@ function BranchMenu(props: {
     }
   }
 
+  // 「本地文件状态」= 把当前未提交的改动一起带进任务空间;选普通分支则是干净检出(不含未提交改动)。
+  // 目录名是随机后缀,认不出来源,勾选取 Host 的任务空间档案(carryWorking)。
+  const localSelected = status?.arm?.carry === true || status?.carryWorking === true
+  function pickLocalState() {
+    if (status?.branch === undefined) return void onClose()
+    return arm("worktree", { ref: status.branch, carry: true })
+  }
+
   async function pickBranch(ref: string) {
-    if (!cwd || busy) return
-    const existing = (branches?.worktrees ?? []).find((item) => !item.main && item.branch === ref)
-    if (existing) return void openPath(existing.path)
-    if (!inWorktree && ref === (branches?.current ?? status?.branch)) return void openPath(branches?.mainToplevel ?? status?.mainToplevel)
-    setError(undefined)
-    setBusy(true)
-    try {
-      const created = await api.branch(cwd, ref)
-      await openPath(created.path)
-    } catch (cause) {
-      setError(String((cause as Error).message ?? cause))
-      setBusy(false)
-    }
+    if (busy) return
+    // 生效目录就在该分支上且没有 arm 意图:已经是它了。
+    if (ref === status?.branch && status?.arm == null) return void onClose()
+    await arm("worktree", { ref })
+  }
+
+  // 「新建分支」:只登记意图,Host 在首条消息进 inbox 时才建分支 + Worktree 并切入。
+  async function submitNewBranch() {
+    if (!newName.trim()) return
+    await arm("worktree", { newBranch: newName.trim() })
+    setCreating(false)
+    setNewName("")
   }
 
   return (
     <>
-      {onBack && (
-        <div className="qwt-back" onClick={onBack}>
-          <span className="qwt-backIcon"><IconChevron /></span>
-          <span>选择模式</span>
-        </div>
-      )}
       <div className="qwt-searchRow">
         <input
           ref={searchRef}
@@ -245,63 +318,110 @@ function BranchMenu(props: {
         <div className="qwt-empty">{NOT_REPO}</div>
       ) : (
         <div className="qwt-list" ref={listRef}>
-          {needle === "" && (
+          {needle === "" && worktreeMode && (
             <section className="qwt-group">
               <span className="qwt-groupStart" aria-hidden="true" />
-              <div className="qwt-groupHeading" data-qwt-heading>本地文件状态</div>
+              <div className="qwt-groupHeading" data-qwt-heading title="把当前未提交的改动一起带进任务空间">本地文件状态</div>
               <div
                 className="qwt-item"
-                data-active={String(!inWorktree)}
-                title={branches?.mainToplevel ?? status?.mainToplevel}
-                onClick={() => void openPath(branches?.mainToplevel ?? status?.mainToplevel)}
+                title={status?.mainToplevel}
+                onClick={() => void pickLocalState()}
               >
-                <span className="qwt-glyph"><IconBranch /></span>
-                <span>{branches?.current ?? status?.branch}</span>
-                <span className="qwt-sub">{(status?.changes ?? 0) > 0 ? "含本地代码更改" : "没有本地代码更改"}</span>
-                {!inWorktree && <span className="qwt-check"><IconCheck /></span>}
+                <span className="qwt-glyph"><IconWorktree /></span>
+                <span>{status?.branch}</span>
+                <span className="qwt-sub">{(status?.changes ?? 0) > 0 ? `${status?.changes} 个未提交改动` : "无未提交改动"}</span>
+                {localSelected && <span className="qwt-check"><IconCheck /></span>}
               </div>
             </section>
           )}
           <section className="qwt-group">
             <span className="qwt-groupStart" aria-hidden="true" />
-            <div className="qwt-groupHeading" data-qwt-heading>本地分支</div>
-            {locals.map((name) => (
+            <div className="qwt-groupHeading" data-qwt-heading title="仓库里已提交历史的分支">本地分支</div>
+            {locals.map((name) => {
+              // 勾了「本地文件状态」时不再勾分支行:两者是互斥的两种任务空间来源。
+              const checked = name === status?.branch && !localSelected
+              return (
               <div
                 key={name}
                 className="qwt-item"
-                data-active={String(name === (branches?.current ?? status?.branch))}
+                data-active={String(checked)}
                 title={name}
                 onClick={() => void pickBranch(name)}
               >
                 <span className="qwt-glyph"><IconBranch /></span>
                 <span>{name}</span>
-                {name === (branches?.current ?? status?.branch) && <span className="qwt-check"><IconCheck /></span>}
+                {checked && <span className="qwt-check"><IconCheck /></span>}
               </div>
-            ))}
+              )
+            })}
             {locals.length === 0 && <div className="qwt-empty">没有匹配的本地分支</div>}
           </section>
         </div>
       )}
-      {error && <div className="qwt-error">{error}</div>}
+      {!worktreeMode && (
+      <div className="qwt-new">
+        {creating ? (
+          <input
+            ref={newRef}
+            className="qwt-newInput"
+            placeholder="新分支名称，Enter 创建"
+            value={newName}
+            disabled={busy}
+            spellCheck={false}
+            onChange={(event) => setNewName(event.target.value)}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === "Enter") void submitNewBranch()
+              if (event.key === "Escape") {
+                setCreating(false)
+                setNewName("")
+                setError(undefined)
+                searchRef.current?.focus()
+              }
+            }}
+          />
+        ) : (
+          <div className="qwt-item" title="从当前 HEAD 创建新分支并在新 Worktree 打开" onClick={() => { setError(undefined); setCreating(true) }}>
+            <span className="qwt-glyph"><IconPlus /></span>
+            <span>新建分支</span>
+          </div>
+        )}
+      </div>
+      )}
+      {error ?? status?.arm?.error ? <div className="qwt-error">{error ?? status?.arm?.error}</div> : null}
     </>
   )
 }
 
-function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd?: string) {
-  const [status, setStatus] = useState<Status | undefined>(undefined)
+// 切换会话时插槽会重挂,若等 RPC 回来才渲染,芯片要空 ~0.5s 才蹦出来。
+// 两级缓存:byKey 带会话(有 arm/生效目录这类会话态),byCwd 只按目录——同仓库的
+// 每个新会话第一次也能拿 byCwd 立刻画分支,后台再用 byKey 的精确结果覆盖。
+const statusByKey = new Map<string, Status>()
+const statusByCwd = new Map<string, Status>()
+const statusKey = (cwd: string | undefined, sessionId: string | undefined) => `${sessionId ?? ""}|${cwd ?? ""}`
+
+function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | undefined, sessionId: string | undefined, nonce: number) {
+  const [status, setStatus] = useState<Status | undefined>(() =>
+    cwd === undefined ? undefined : statusByKey.get(statusKey(cwd, sessionId)) ?? statusByCwd.get(cwd))
   useEffect(() => {
+    // 换会话/换目录:先显示缓存(没有就清空),不等网络。
+    setStatus(cwd === undefined ? undefined : statusByKey.get(statusKey(cwd, sessionId)) ?? statusByCwd.get(cwd))
     if (!cwd) return undefined
     let alive = true
     const poll = async () => {
       try {
-        const next = await api.status(cwd)
+        const next = await api.status(cwd, sessionId)
+        statusByKey.set(statusKey(cwd, sessionId), next)
+        // 会话态字段不进目录级缓存,免得串到别的会话。
+        const { arm: _arm, workingPath: _wp, ...shared } = next
+        statusByCwd.set(cwd, shared as Status)
         if (alive) setStatus(next)
       } catch { /* the next tick retries */ }
     }
     void poll()
     const timer = setInterval(poll, 8000)
     return () => { alive = false; clearInterval(timer) }
-  }, [api, cwd])
+  }, [api, cwd, sessionId, nonce])
   return status
 }
 
@@ -319,16 +439,20 @@ function useAnchorDismiss(menuOpen: boolean, chipRef: { current: HTMLElement | n
   }, [menuOpen])
 }
 
-// 顶行(新会话)模式 chip:菜单只有「本地模式 / Worktree 模式」两项;选 Worktree 模式时唤起右侧分支 chip 的下拉。
+// 顶行(新会话)模式 chip:菜单只有「本地模式 / Worktree 模式」两项。选择只登记待发送意图(arm),
+// Host 在该会话首条消息进 inbox 时才建 worktree 并把会话生效目录原地切过去——不建工作区、不切会话。
 function ModeChip(props: {
   api: ReturnType<typeof createApi>
-  open: OpenActions
+  sessionId?: string
   status?: Status
   cwd?: string
+  onArm: () => void
 }) {
-  const { api, open, status, cwd } = props
+  const { api, sessionId, status, cwd, onArm } = props
   const [menuOpen, setMenuOpen] = useState(false)
   const [anchorStyle, setAnchorStyle] = useState<{ left: number, top: number, transform?: string } | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
   const chipRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -343,9 +467,9 @@ function ModeChip(props: {
   }, [menuOpen])
 
   const repo = status?.repo === true
-  const inWorktree = status?.worktrees.some((item) => !item.main && samePath(item.path, cwd)) === true
-  const [, setPendingTick] = useState(0)
-  const pending = cwd !== undefined && pendingWorktree.cwd !== undefined && samePath(pendingWorktree.cwd, cwd)
+  const inWorktree = worktreeOf(status, cwd) !== undefined
+  const armed = status?.arm?.mode
+  const worktreeMode = armed === "worktree" ? true : armed === "local" ? false : inWorktree
 
   // 与宿主工作区下拉一致,默认贴在 chip 下方;底部放不下且上方有空间时才向上翻。
   function anchorBelow() {
@@ -359,34 +483,43 @@ function ModeChip(props: {
   }
 
   function toggle() {
-    if (!menuOpen) anchorBelow()
+    if (!menuOpen) {
+      setError(undefined)
+      anchorBelow()
+    }
     setMenuOpen((value) => !value)
   }
 
-  async function goLocal() {
-    pendingWorktree.cwd = undefined
-    setPendingTick((value) => value + 1)
-    const target = status?.mainToplevel
-    if (!target) return
+  async function arm(mode: "local" | "worktree", extra?: { ref?: string }) {
+    if (!cwd || !sessionId || busy) return
+    setBusy(true)
+    setError(undefined)
     try {
-      const workspace = await open.workspacesCreate(target)
-      await open.openWorkspace(workspace.workspaceId)
+      await api.arm(sessionId, { cwd, mode, ...extra })
+      onArm()
       setMenuOpen(false)
-    } catch { /* 菜单留着,下次再试 */ }
+    } catch (cause) {
+      setError(String((cause as Error).message ?? cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function goLocal() {
+    if (worktreeMode) void arm("local")
+    else setMenuOpen(false)
   }
 
   function pickWorktreeMode() {
-    // 只标记 Worktree 模式,不马上建工作区;等用户发送消息时才创建(SessionBar 负责)。
-    if (!repo || inWorktree || !status?.branch) return
-    pendingWorktree.cwd = cwd
-    setMenuOpen(false)
-    setPendingTick((value) => value + 1)
+    if (!repo || worktreeMode || !status?.branch) return
+    // 为当前分支建(或复用)worktree——主树占用的分支自动 --detach,目录名 main-<短sha>(Qoder 风格)。
+    void arm("worktree", { ref: status.branch })
   }
 
   return (
     <div ref={chipRef} className="qwt-chip" data-open={String(menuOpen)} onClick={toggle}>
-      <span className="qwt-glyph">{inWorktree || pending ? <IconBranch /> : <IconLocal />}</span>
-      <span>{inWorktree || pending ? "Worktree 模式" : "本地模式"}</span>
+      <span className="qwt-glyph">{worktreeMode ? <IconBranch /> : <IconLocal />}</span>
+      <span>{worktreeMode ? "Worktree 模式" : "本地模式"}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
         <div
@@ -396,23 +529,24 @@ function ModeChip(props: {
           onClick={(event) => event.stopPropagation()}
         >
           <div className="qwt-list">
-            <div className="qwt-item" data-active={String(!inWorktree && !pending)} onClick={() => void goLocal()}>
+            <div className="qwt-item" data-active={String(!worktreeMode)} onClick={() => void goLocal()}>
               <span className="qwt-glyph"><IconLocal /></span>
               <span>本地模式</span>
-              {(!inWorktree && !pending) && <span className="qwt-check"><IconCheck /></span>}
+              {!worktreeMode && <span className="qwt-check"><IconCheck /></span>}
             </div>
             <div
               className="qwt-item"
-              data-active={String(inWorktree || pending)}
+              data-active={String(worktreeMode)}
               data-disabled={String(!repo || !status?.branch)}
               title={repo && status?.branch ? undefined : "请选择已有提交且支持 Worktree 的本机 Git Workspace"}
-              onClick={pickWorktreeMode}
+              onClick={() => void pickWorktreeMode()}
             >
               <span className="qwt-glyph"><IconBranch /></span>
               <span>Worktree 模式</span>
-              {(inWorktree || pending) && <span className="qwt-check"><IconCheck /></span>}
+              {worktreeMode && <span className="qwt-check"><IconCheck /></span>}
             </div>
           </div>
+          {error ?? status?.arm?.error ? <div className="qwt-error">{error ?? status?.arm?.error}</div> : null}
         </div>,
         document.body,
       )}
@@ -420,18 +554,24 @@ function ModeChip(props: {
   )
 }
 
-// 顶行分支 chip:点击弹出分支选择器(本地/远程/拉取更新)。
+// 顶行分支 chip:点击弹出分支选择器;选中分支/新建分支只登记意图,发送时才落地。
 function BranchChip(props: {
   api: ReturnType<typeof createApi>
-  open: OpenActions
+  sessionId?: string
   status?: Status
   cwd?: string
+  onArm: () => void
 }) {
-  const { api, open, status, cwd } = props
+  const { api, sessionId, status, cwd, onArm } = props
   const [menuOpen, setMenuOpen] = useState(false)
   const [anchorStyle, setAnchorStyle] = useState<{ left: number, top: number, transform?: string } | undefined>(undefined)
   const chipRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+
+  // 芯片一出现就把分支列表拉进缓存,点开菜单时先画缓存;悬停再补一次新鲜的。
+  useEffect(() => {
+    loadBranches(api, cwd)?.catch(() => { /* 点开菜单时还会再试 */ })
+  }, [api, cwd])
 
   useAnchorDismiss(menuOpen, chipRef, menuRef, () => setMenuOpen(false))
   useEffect(() => {
@@ -456,12 +596,23 @@ function BranchChip(props: {
     setMenuOpen(true)
   }
 
-  if (!status?.branch) return null
+  // 任务空间里显示空间名(main-387e3f22,WorkBuddy 同款:detached 时没有分支名可显示);
+  // 主树里显示分支名。有待发送意图时优先显示意图。
+  const space = worktreeOf(status, cwd)
+  const label = status?.arm?.newBranch ?? status?.arm?.ref ?? (space !== undefined ? basename(space.path) : status?.branch)
+
+  if (!label) return null
 
   return (
-    <div ref={chipRef} className="qwt-chip" data-open={String(menuOpen)} onClick={() => (menuOpen ? setMenuOpen(false) : openMenu())}>
+    <div
+      ref={chipRef}
+      className="qwt-chip"
+      data-open={String(menuOpen)}
+      onPointerEnter={() => { loadBranches(api, cwd, true)?.catch(() => { /* 菜单里还会再试 */ }) }}
+      onClick={() => (menuOpen ? setMenuOpen(false) : openMenu())}
+    >
       <span className="qwt-glyph"><IconBranch /></span>
-      <span>{status.branch}</span>
+      <span>{label}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
         <div
@@ -472,9 +623,10 @@ function BranchChip(props: {
         >
           <BranchMenu
             api={api}
-            open={open}
+            sessionId={sessionId}
             status={status}
             cwd={cwd}
+            onArm={onArm}
             onClose={() => setMenuOpen(false)}
           />
         </div>,
@@ -484,63 +636,44 @@ function BranchChip(props: {
   )
 }
 
-// 新会话(hero 顶行):模式 chip + 分支 chip 并排。
+// 新会话(hero 顶行):模式 chip + 分支 chip 并排;arm 登记后立刻重拉 status 让芯片乐观显示。
 function HeroBar(props: {
   api: ReturnType<typeof createApi>
-  open: OpenActions
   sessionId?: string
   useSessions: (selector: (state: any) => unknown) => unknown
 }) {
-  const { api, open, sessionId, useSessions } = props
+  const { api, sessionId, useSessions } = props
   const cwd = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)) as string | undefined
-  const status = useWorktreeStatus(api, cwd)
+  const [nonce, setNonce] = useState(0)
+  const status = useWorktreeStatus(api, cwd, sessionId, nonce)
+  const onArm = useCallback(() => setNonce((value) => value + 1), [])
   if (sessionId === undefined) return null
+  // 不是 Git 仓库(或还没探出来)就不占顶行位置。
+  if (status?.repo !== true) return null
   return (
     <div className="qwt-pair">
-      <ModeChip api={api} open={open} status={status} cwd={cwd} />
-      <BranchChip api={api} open={open} status={status} cwd={cwd} />
+      <ModeChip api={api} sessionId={sessionId} status={status} cwd={cwd} onArm={onArm} />
+      <BranchChip api={api} sessionId={sessionId} status={status} cwd={cwd} onArm={onArm} />
     </div>
   )
 }
 
-// 会话中(输入行):只读显示,保留 hover 背景;新会话草稿态由顶行负责,这里不出。
-// 同时负责「发送时才建 worktree」:标记了 Worktree 模式后,草稿发送(草稿态翻转为真实会话)即创建并跳转。
+// 会话中(输入行):只读显示当前生效位置;新会话草稿态由顶行负责,这里不出。
 function SessionBar(props: {
   api: ReturnType<typeof createApi>
-  open: OpenActions
   sessionId?: string
   useSessions: (selector: (state: any) => unknown) => unknown
 }) {
-  const { api, open, sessionId, useSessions } = props
+  const { api, sessionId, useSessions } = props
   const cwd = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)) as string | undefined
   const draft = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.blank)) as boolean | undefined
-  const status = useWorktreeStatus(api, cwd)
-  const wasDraftRef = useRef(false)
-
-  useEffect(() => {
-    if (draft === true) {
-      wasDraftRef.current = true
-      return
-    }
-    if (draft !== false || !wasDraftRef.current) return
-    wasDraftRef.current = false
-    const target = pendingWorktree.cwd
-    if (!target) return
-    pendingWorktree.cwd = undefined
-    const branch = status?.branch
-    if (!branch || !samePath(target, cwd)) return
-    void (async () => {
-      try {
-        const created = await api.branch(target, branch)
-        const workspace = await open.workspacesCreate(created.path)
-        await open.openWorkspace(workspace.workspaceId)
-      } catch { /* 创建失败则留在当前工作区 */ }
-    })()
-  }, [draft, cwd, status, api, open])
+  const status = useWorktreeStatus(api, cwd, sessionId, 0)
 
   if (sessionId === undefined || draft === true) return null
   const repo = status?.repo === true
-  const worktree = status?.worktrees.find((item) => !item.main && samePath(item.path, cwd))
+  // 非 Git 工作区不显示这枚芯片。
+  if (!repo) return null
+  const worktree = worktreeOf(status, cwd)
   const label = worktree
     ? basename(worktree.path)
     : repo && status?.branch ? status.branch : "本地模式"
@@ -554,14 +687,10 @@ function SessionBar(props: {
 
 export const QoderWorktreePlugin = {
   name: "dsh-qoder-worktree",
-  inject: ["slots", "connection", "workspaces", "uiWorkspace", "sessions"],
+  inject: ["slots", "connection"],
   apply(ctx: ClientContext & Record<string, any>) {
     ctx.effect(installStyles, "dsh-qoder-worktree styles")
     const api = createApi(ctx.connection)
-    const open: OpenActions = {
-      workspacesCreate: (path: string) => ctx.workspaces.create({ path }),
-      openWorkspace: (workspaceId: string) => ctx.uiWorkspace.openWorkspace(workspaceId),
-    }
 
     ctx.slots.inject("conversation.hero.options", () => ctx.slots.register(
       {
@@ -573,7 +702,6 @@ export const QoderWorktreePlugin = {
       (props: any) => (
         <HeroBar
           api={api}
-          open={open}
           sessionId={props.sessionId}
           useSessions={props.useSessions}
         />
@@ -590,7 +718,6 @@ export const QoderWorktreePlugin = {
       (props: any) => (
         <SessionBar
           api={api}
-          open={open}
           sessionId={props.sessionId}
           useSessions={props.useSessions}
         />
