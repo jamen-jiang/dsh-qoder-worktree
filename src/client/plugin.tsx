@@ -280,7 +280,7 @@ function BranchMenu(props: {
   }
 
   // 「本地文件状态」= 把当前未提交的改动一起带进任务空间;选普通分支则是干净检出(不含未提交改动)。
-  // 目录名是随机后缀,认不出来源,勾选取 Host 的任务空间档案(carryWorking)。
+  // 没有未提交改动时整组不显示(用户 m04786)。目录名是随机后缀,认不出来源,勾选取 Host 的任务空间档案(carryWorking)。
   const localSelected = status?.arm?.carry === true || status?.carryWorking === true
   function pickLocalState() {
     if (status?.branch === undefined) return void onClose()
@@ -328,7 +328,7 @@ function BranchMenu(props: {
         <div className="qwt-empty">{NOT_REPO}</div>
       ) : (
         <div className="qwt-list" ref={listRef}>
-          {needle === "" && worktreeMode && (
+          {needle === "" && worktreeMode && (status?.changes ?? 0) > 0 && (
             <section className="qwt-group">
               <span className="qwt-groupStart" aria-hidden="true" />
               <div className="qwt-groupHeading" data-qwt-heading title="把当前未提交的改动一起带进任务空间">本地文件状态</div>
