@@ -58,7 +58,7 @@ function createApi(connection: Connection) {
     // 当前会话原地指向 path(worktree/主树):不建工作区、不切会话,草稿留在输入框里。
     use: (sessionId: string, path: string) => call("use", { sessionId, path }),
     // 登记待发送意图:切模式/选分支只 arm,Host 在首条消息进 inbox 时才建 worktree 并切目录。
-    arm: (sessionId: string, payload: { cwd: string, mode: "local" | "worktree", ref?: string, newBranch?: string }) =>
+    arm: (sessionId: string, payload: { cwd: string, mode: "local" | "worktree", ref?: string, newBranch?: string, carry?: boolean }) =>
       call("arm", { sessionId, ...payload }),
     armCancel: (sessionId: string) => call("arm-cancel", { sessionId }),
   }
@@ -492,7 +492,7 @@ function ModeChip(props: {
     setMenuOpen((value) => !value)
   }
 
-  async function arm(mode: "local" | "worktree", extra?: { ref?: string }) {
+  async function arm(mode: "local" | "worktree", extra?: { ref?: string, carry?: boolean }) {
     if (!cwd || !sessionId || busy) return
     setBusy(true)
     setError(undefined)
@@ -514,8 +514,8 @@ function ModeChip(props: {
 
   function pickWorktreeMode() {
     if (!repo || worktreeMode || !status?.branch) return
-    // 为当前分支建(或复用)worktree——主树占用的分支自动 --detach,目录名 main-<短sha>(Qoder 风格)。
-    void arm("worktree", { ref: status.branch })
+    // 默认等同分支菜单的「本地文件状态」:当前分支 + 把未提交改动一起带进任务空间(carry)。
+    void arm("worktree", { ref: status.branch, carry: true })
   }
 
   return (
