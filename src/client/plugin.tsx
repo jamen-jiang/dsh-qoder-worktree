@@ -280,8 +280,9 @@ function BranchMenu(props: {
   }
 
   // 「本地文件状态」= 把当前未提交的改动一起带进任务空间;选普通分支则是干净检出(不含未提交改动)。
-  // 没有未提交改动时整组不显示(用户 m04786)。目录名是随机后缀,认不出来源,勾选取 Host 的任务空间档案(carryWorking)。
-  const localSelected = status?.arm?.carry === true || status?.carryWorking === true
+  // 没有未提交改动时整组不显示(用户 m04786),勾选态同理:没改动就不算「本地文件状态」被选中。
+  // 目录名是随机后缀,认不出来源,勾选取 Host 的任务空间档案(carryWorking)。
+  const localSelected = (status?.arm?.carry === true || status?.carryWorking === true) && (status?.changes ?? 0) > 0
   function pickLocalState() {
     if (status?.branch === undefined) return void onClose()
     return arm("worktree", { ref: status.branch, carry: true })
@@ -635,8 +636,8 @@ function BranchChip(props: {
       onPointerEnter={() => { loadBranches(api, cwd, true)?.catch(() => { /* 菜单里还会再试 */ }) }}
       onClick={() => (menuOpen ? setMenuOpen(false) : openMenu())}
     >
-      {/* 雪花图标=带未提交改动(本地文件状态);普通分支图标=干净检出。 */}
-      <span className="qwt-glyph">{status?.arm?.carry === true || status?.carryWorking === true ? <IconBranch /> : <IconBranchPlain />}</span>
+      {/* 雪花图标=带未提交改动(本地文件状态);普通分支图标=干净检出。没改动就没有雪花,即使 carry 意图在。 */}
+      <span className="qwt-glyph">{(status?.arm?.carry === true || status?.carryWorking === true) && (status?.changes ?? 0) > 0 ? <IconBranch /> : <IconBranchPlain />}</span>
       <span>{label}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
