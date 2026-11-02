@@ -105,19 +105,15 @@ function IconBranch() {
   )
 }
 
-function IconWorktree() {
-  // Qoder 同款:左主干串两节点,中段引线接右下加号大圆,右上小节点带短茎。
+function IconBranchPlain() {
+  // 普通分支(不含未提交改动):左主干串两节点,右上节点折线接回主干中段。
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="6" cy="5" r="2.2" />
       <circle cx="6" cy="19" r="2.2" />
       <line x1="6" y1="7.2" x2="6" y2="16.8" />
-      <path d="M6 12.5h3c2 0 2.8 2.2 4 3.5" />
-      <circle cx="17" cy="6" r="1.8" />
-      <path d="M17 8v2.4" />
-      <circle cx="17" cy="16.5" r="4.2" />
-      <line x1="17" y1="14.1" x2="17" y2="18.9" />
-      <line x1="14.6" y1="16.5" x2="19.4" y2="16.5" />
+      <circle cx="17" cy="6" r="2.2" />
+      <path d="M17 8.2c0 3.3-2.2 4.3-6 4.3H6" />
     </svg>
   )
 }
@@ -329,7 +325,7 @@ function BranchMenu(props: {
                 title={status?.mainToplevel}
                 onClick={() => void pickLocalState()}
               >
-                <span className="qwt-glyph"><IconWorktree /></span>
+                <span className="qwt-glyph"><IconBranch /></span>
                 <span>{status?.branch}</span>
                 <span className="qwt-sub">{(status?.changes ?? 0) > 0 ? `${status?.changes} 个未提交改动` : "无未提交改动"}</span>
                 {localSelected && <span className="qwt-check"><IconCheck /></span>}
@@ -350,7 +346,7 @@ function BranchMenu(props: {
                 title={name}
                 onClick={() => void pickBranch(name)}
               >
-                <span className="qwt-glyph"><IconBranch /></span>
+                <span className="qwt-glyph"><IconBranchPlain /></span>
                 <span>{name}</span>
                 {checked && <span className="qwt-check"><IconCheck /></span>}
               </div>
@@ -520,7 +516,7 @@ function ModeChip(props: {
 
   return (
     <div ref={chipRef} className="qwt-chip" data-open={String(menuOpen)} onClick={toggle}>
-      <span className="qwt-glyph">{worktreeMode ? <IconBranch /> : <IconLocal />}</span>
+      <span className="qwt-glyph">{worktreeMode ? <IconBranchPlain /> : <IconLocal />}</span>
       <span>{worktreeMode ? "Worktree 模式" : "本地模式"}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
@@ -614,7 +610,8 @@ function BranchChip(props: {
       onPointerEnter={() => { loadBranches(api, cwd, true)?.catch(() => { /* 菜单里还会再试 */ }) }}
       onClick={() => (menuOpen ? setMenuOpen(false) : openMenu())}
     >
-      <span className="qwt-glyph"><IconBranch /></span>
+      {/* 雪花图标=带未提交改动(本地文件状态);普通分支图标=干净检出。 */}
+      <span className="qwt-glyph">{status?.arm?.carry === true || status?.carryWorking === true ? <IconBranch /> : <IconBranchPlain />}</span>
       <span>{label}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
@@ -682,7 +679,7 @@ function SessionBar(props: {
     : repo && status?.branch ? status.branch : "本地模式"
   return (
     <div className="qwt-chip qwt-static" title={cwd}>
-      <span className="qwt-glyph">{repo && (worktree || status?.branch) ? <IconBranch /> : <IconLocal />}</span>
+      <span className="qwt-glyph">{repo && (worktree || status?.branch) ? (status?.carryWorking === true || status?.arm?.carry === true ? <IconBranch /> : <IconBranchPlain />) : <IconLocal />}</span>
       <span>{label}</span>
     </div>
   )
