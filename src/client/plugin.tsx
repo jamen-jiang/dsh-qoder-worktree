@@ -118,6 +118,19 @@ function IconBranchPlain() {
   )
 }
 
+function IconFork() {
+  // Worktree 模式:上两节点经 U 形汇流到下方单节点(git-fork 竖放)。
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="6.5" cy="5.5" r="2.2" />
+      <circle cx="17.5" cy="5.5" r="2.2" />
+      <path d="M6.5 7.7v1.6c0 1.4 1 2.2 2.4 2.2h6.2c1.4 0 2.4-.8 2.4-2.2V7.7" />
+      <circle cx="12" cy="18.5" r="2.2" />
+      <line x1="12" y1="11.5" x2="12" y2="16.3" />
+    </svg>
+  )
+}
+
 function IconLocal() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -516,7 +529,7 @@ function ModeChip(props: {
 
   return (
     <div ref={chipRef} className="qwt-chip" data-open={String(menuOpen)} onClick={toggle}>
-      <span className="qwt-glyph">{worktreeMode ? <IconBranchPlain /> : <IconLocal />}</span>
+      <span className="qwt-glyph">{worktreeMode ? <IconFork /> : <IconLocal />}</span>
       <span>{worktreeMode ? "Worktree 模式" : "本地模式"}</span>
       <span className="qwt-caret"><IconChevron /></span>
       {menuOpen && anchorStyle && createPortal(
@@ -539,7 +552,7 @@ function ModeChip(props: {
               title={repo && status?.branch ? undefined : "请选择已有提交且支持 Worktree 的本机 Git Workspace"}
               onClick={() => void pickWorktreeMode()}
             >
-              <span className="qwt-glyph"><IconBranch /></span>
+              <span className="qwt-glyph"><IconFork /></span>
               <span>Worktree 模式</span>
               {worktreeMode && <span className="qwt-check"><IconCheck /></span>}
             </div>
