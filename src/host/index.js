@@ -153,19 +153,22 @@ async function repoStatus(cwd, sessionId) {
   if (!inside.ok || inside.stdout !== 'true') {
     return { repo: false, branch: undefined, commits: 0, worktrees: [], mainToplevel: undefined }
   }
-  const toplevel = await git(cwd, ['rev-parse', '--show-toplevel'])
-  const list = await git(cwd, ['worktree', 'list', '--porcelain'])
-  const worktrees = parseWorktrees(list.ok ? list.stdout : '')
-  // 主树路径必须取 worktree 列表里 main 那条:show-toplevel 在 worktree 内会返回 worktree 自己的路径。
-  const mainToplevel = worktrees.find((item) => item.main)?.path ?? (toplevel.ok ? toplevel.stdout : undefined)
   // 会话生效目录(可能指向别的 worktree)优先:分支/改动数按那个目录算,状态才反映真实工作位置。
   const workingPath = sessionWorkingPath(sessionId)
   const dir = workingPath !== undefined && existsSync(workingPath) ? workingPath : cwd
-  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD'])
+  // 五个 git 调用互不依赖,并行跑:Windows 进程启动贵,串行一次 status 要 300-900ms。
+  const [toplevel, list, branch, count, porcelain] = await Promise.all([
+    git(cwd, ['rev-parse', '--show-toplevel']),
+    git(cwd, ['worktree', 'list', '--porcelain']),
+    git(dir, ['symbolic-ref', '--short', 'HEAD']),
+    git(dir, ['rev-list', '--count', 'HEAD']),
+    git(dir, ['status', '--porcelain']),
+  ])
+  const worktrees = parseWorktrees(list.ok ? list.stdout : '')
+  // 主树路径必须取 worktree 列表里 main 那条:show-toplevel 在 worktree 内会返回 worktree 自己的路径。
+  const mainToplevel = worktrees.find((item) => item.main)?.path ?? (toplevel.ok ? toplevel.stdout : undefined)
   const branchValue = branch.ok ? branch.stdout : undefined
-  const count = await git(dir, ['rev-list', '--count', 'HEAD'])
   const commits = count.ok ? Number(count.stdout) || 0 : 0
-  const porcelain = await git(dir, ['status', '--porcelain'])
   const changes = porcelain.ok ? porcelain.stdout.split('\n').filter((line) => line.trim()).length : 0
   // 待发送意图(切了模式还没发消息):客户端据此乐观显示"Worktree 模式"。
   const arm = sessionId !== undefined && sessionId !== '' ? readArms()[sessionId] ?? null : null

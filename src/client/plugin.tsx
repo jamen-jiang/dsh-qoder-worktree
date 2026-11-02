@@ -208,7 +208,7 @@ function BranchMenu(props: {
   sessionId?: string
   status?: Status
   cwd?: string
-  onArm: () => void
+  onArm: (arm?: Status["arm"]) => void
   onClose: () => void
 }) {
   const { api, sessionId, status, cwd, onArm, onClose } = props
@@ -270,8 +270,7 @@ function BranchMenu(props: {
     setError(undefined)
     setBusy(true)
     try {
-      await api.arm(sessionId, { cwd, mode, ...extra })
-      onArm()
+      onArm(await api.arm(sessionId, { cwd, mode, ...extra }))
       onClose()
     } catch (cause) {
       setError(String((cause as Error).message ?? cause))
@@ -433,7 +432,17 @@ function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | unde
     const timer = setInterval(poll, 8000)
     return () => { alive = false; clearInterval(timer) }
   }, [api, cwd, sessionId, nonce])
-  return status
+  // arm 登记成功后 Host 会把新意图原样返回:直接并进本地状态,chip 立刻变,
+  // 不等下一次完整 status(一串 git 子进程)回来。nonce 触发的后台刷新负责最终一致。
+  const patchArm = useCallback((arm: Status["arm"]) => {
+    setStatus((prev) => {
+      if (prev === undefined) return prev
+      const next = { ...prev, arm }
+      statusByKey.set(statusKey(cwd, sessionId), next)
+      return next
+    })
+  }, [cwd, sessionId])
+  return [status, patchArm] as const
 }
 
 function useAnchorDismiss(menuOpen: boolean, chipRef: { current: HTMLElement | null }, menuRef: { current: HTMLElement | null }, close: () => void) {
@@ -457,7 +466,7 @@ function ModeChip(props: {
   sessionId?: string
   status?: Status
   cwd?: string
-  onArm: () => void
+  onArm: (arm?: Status["arm"]) => void
 }) {
   const { api, sessionId, status, cwd, onArm } = props
   const [menuOpen, setMenuOpen] = useState(false)
@@ -506,8 +515,7 @@ function ModeChip(props: {
     setBusy(true)
     setError(undefined)
     try {
-      await api.arm(sessionId, { cwd, mode, ...extra })
-      onArm()
+      onArm(await api.arm(sessionId, { cwd, mode, ...extra }))
       setMenuOpen(false)
     } catch (cause) {
       setError(String((cause as Error).message ?? cause))
@@ -571,7 +579,7 @@ function BranchChip(props: {
   sessionId?: string
   status?: Status
   cwd?: string
-  onArm: () => void
+  onArm: (arm?: Status["arm"]) => void
 }) {
   const { api, sessionId, status, cwd, onArm } = props
   const [menuOpen, setMenuOpen] = useState(false)
@@ -658,8 +666,12 @@ function HeroBar(props: {
   const { api, sessionId, useSessions } = props
   const cwd = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)) as string | undefined
   const [nonce, setNonce] = useState(0)
-  const status = useWorktreeStatus(api, cwd, sessionId, nonce)
-  const onArm = useCallback(() => setNonce((value) => value + 1), [])
+  const [status, patchArm] = useWorktreeStatus(api, cwd, sessionId, nonce)
+  // 先乐观并进返回的 arm(chip/菜单勾立刻变),再 bump nonce 后台拉全量对账。
+  const onArm = useCallback((arm?: Status["arm"]) => {
+    patchArm(arm)
+    setNonce((value) => value + 1)
+  }, [patchArm])
   if (sessionId === undefined) return null
   // 不是 Git 仓库(或还没探出来)就不占顶行位置。
   if (status?.repo !== true) return null
@@ -680,7 +692,7 @@ function SessionBar(props: {
   const { api, sessionId, useSessions } = props
   const cwd = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)) as string | undefined
   const draft = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.blank)) as boolean | undefined
-  const status = useWorktreeStatus(api, cwd, sessionId, 0)
+  const [status] = useWorktreeStatus(api, cwd, sessionId, 0)
 
   if (sessionId === undefined || draft === true) return null
   const repo = status?.repo === true
