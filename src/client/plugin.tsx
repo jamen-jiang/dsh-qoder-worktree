@@ -410,7 +410,7 @@ const statusByKey = new Map<string, Status>()
 const statusByCwd = new Map<string, Status>()
 const statusKey = (cwd: string | undefined, sessionId: string | undefined) => `${sessionId ?? ""}|${cwd ?? ""}`
 
-function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | undefined, sessionId: string | undefined, nonce: number) {
+function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | undefined, sessionId: string | undefined, nonce: number, burst = false) {
   const [status, setStatus] = useState<Status | undefined>(() =>
     cwd === undefined ? undefined : statusByKey.get(statusKey(cwd, sessionId)) ?? statusByCwd.get(cwd))
   useEffect(() => {
@@ -418,7 +418,9 @@ function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | unde
     setStatus(cwd === undefined ? undefined : statusByKey.get(statusKey(cwd, sessionId)) ?? statusByCwd.get(cwd))
     if (!cwd) return undefined
     let alive = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
+      let landing = false
       try {
         const next = await api.status(cwd, sessionId)
         statusByKey.set(statusKey(cwd, sessionId), next)
@@ -426,12 +428,14 @@ function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | unde
         const { arm: _arm, workingPath: _wp, ...shared } = next
         statusByCwd.set(cwd, shared as Status)
         if (alive) setStatus(next)
+        // 登记还在 = 发送后正在建工作树,Host 落地成功才会销掉:追着轮,chip 秒级跟上。
+        landing = next?.arm != null && next.arm.error === undefined
       } catch { /* the next tick retries */ }
+      if (alive) timer = setTimeout(poll, burst && landing ? 1200 : 8000)
     }
     void poll()
-    const timer = setInterval(poll, 8000)
-    return () => { alive = false; clearInterval(timer) }
-  }, [api, cwd, sessionId, nonce])
+    return () => { alive = false; if (timer !== undefined) clearTimeout(timer) }
+  }, [api, cwd, sessionId, nonce, burst])
   // arm 登记成功后 Host 会把新意图原样返回:直接并进本地状态,chip 立刻变,
   // 不等下一次完整 status(一串 git 子进程)回来。nonce 触发的后台刷新负责最终一致。
   const patchArm = useCallback((arm: Status["arm"]) => {
@@ -692,7 +696,7 @@ function SessionBar(props: {
   const { api, sessionId, useSessions } = props
   const cwd = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)) as string | undefined
   const draft = useSessions((state: any) => (sessionId === undefined ? undefined : state.byId[sessionId]?.blank)) as boolean | undefined
-  const [status] = useWorktreeStatus(api, cwd, sessionId, 0)
+  const [status] = useWorktreeStatus(api, cwd, sessionId, 0, true)
 
   if (sessionId === undefined || draft === true) return null
   const repo = status?.repo === true

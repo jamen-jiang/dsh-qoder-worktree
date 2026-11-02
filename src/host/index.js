@@ -419,20 +419,23 @@ async function consumeArm(agent) {
   const arms = readArms()
   const arm = arms[agent.session.id]
   if (arm === undefined) return
-  delete arms[agent.session.id]
-  writeArms(arms)
+  // 登记先留着:它存在=「正在落地」,客户端据此短周期轮询,落地后 chip 秒级更新。
   try {
     if (arm.mode === 'local') {
       const status = await repoStatus(arm.cwd)
       if (status.mainToplevel) await applyWorking(agent, status.mainToplevel)
-      return
+    } else {
+      const created = arm.newBranch
+        ? await createBranch(arm.cwd, arm.newBranch)
+        : await createWorktreeFromBranch(arm.cwd, arm.ref, arm.carry === true
+          ? { carry: true, from: await currentWorkingDir(arm.cwd, agent.session.id) }
+          : undefined)
+      await applyWorking(agent, created.path)
     }
-    const created = arm.newBranch
-      ? await createBranch(arm.cwd, arm.newBranch)
-      : await createWorktreeFromBranch(arm.cwd, arm.ref, arm.carry === true
-        ? { carry: true, from: await currentWorkingDir(arm.cwd, agent.session.id) }
-        : undefined)
-    await applyWorking(agent, created.path)
+    // 落地成功才销登记。
+    const landed = readArms()
+    delete landed[agent.session.id]
+    writeArms(landed)
   } catch (error) {
     const message = String(error?.message ?? error)
     console.warn('[qwt] 发送时切入 Worktree 失败:', error)
