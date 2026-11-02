@@ -1,6 +1,6 @@
 {
   "name": "dsh-qoder-worktree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Qoder 风格的工作区模式与分支指示器：在会话控制行显示 本地模式 / Worktree 模式 与当前分支，Worktree 模式为每个 Git 仓库按任务创建独立 worktree 并一键切换。Qoder-style workspace mode & branch indicator for DeepSeek Harness.",
   "icon": "./icon.svg",
   "repository": {
