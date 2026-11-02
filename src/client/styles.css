@@ -30,8 +30,8 @@
 .qwt-groupHeading[data-stuck]{background:var(--dsw-alias-menu-group-header-fill,var(--dsw-specific-menu,#fff))}
 .qwt-item{box-sizing:border-box;display:flex;align-items:center;gap:6px;min-height:34px;padding:5px 7px;border-radius:var(--dsw-radius-md,6px);font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary,#222);cursor:pointer;white-space:nowrap}
 .qwt-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}
-/* 纯状态行:不可点,不抢"选中"语义。 */
-.qwt-static,.qwt-static:hover{cursor:default;background:transparent}
+/* 纯状态行:不可点,但 hover 有背景(对齐宿主触发器)。 */
+.qwt-static{cursor:default}
 .qwt-check{display:flex;align-items:center;margin-left:auto;flex:none;color:var(--dsw-alias-label-primary,#222)}
 .qwt-check svg{width:14px;height:14px}
 .qwt-item .qwt-sub+.qwt-check{margin-left:4px}
