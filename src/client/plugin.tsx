@@ -708,7 +708,8 @@ function SessionBar(props: {
     : repo && status?.branch ? status.branch : "本地模式"
   return (
     <div className="qwt-chip qwt-static" title={cwd}>
-      <span className="qwt-glyph">{repo && (worktree || status?.branch) ? (status?.carryWorking === true || status?.arm?.carry === true ? <IconBranch /> : <IconBranchPlain />) : <IconLocal />}</span>
+      {/* 会话中固定用 Qoder 状态栏那个分支图标(用户特写 m04725);带/不带未提交的区分只留在新会话顶行。 */}
+      <span className="qwt-glyph"><IconBranchPlain /></span>
       <span>{label}</span>
     </div>
   )
