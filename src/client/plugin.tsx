@@ -118,6 +118,18 @@ function IconBranchPlain() {
   )
 }
 
+// 宿主 state-dot spinner 的 DOM 结构(svg 24 > g > track 环 + arc 弧段),样式照搬 _spinner_1i3xo 系。
+function IconSpinner() {
+  return (
+    <svg className="qwt-spinner" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+      <g>
+        <circle className="qwt-spin-track" cx="12" cy="12" r="9.5" />
+        <circle className="qwt-spin-arc" cx="12" cy="12" r="9.5" />
+      </g>
+    </svg>
+  )
+}
+
 function IconFork() {
   // Worktree 模式:上两节点经 U 形汇流到下方单节点(git-fork 竖放)。
   return (
@@ -423,14 +435,14 @@ function useWorktreeStatus(api: ReturnType<typeof createApi>, cwd: string | unde
     const poll = async () => {
       let landing = false
       try {
-        const next = await api.status(cwd, sessionId)
-        statusByKey.set(statusKey(cwd, sessionId), next)
+        const response = await api.status(cwd, sessionId)
+        statusByKey.set(statusKey(cwd, sessionId), response as Status)
         // 会话态字段不进目录级缓存,免得串到别的会话。
-        const { arm: _arm, workingPath: _wp, ...shared } = next
+        const { arm: _arm, workingPath: _wp, ...shared } = response
         statusByCwd.set(cwd, shared as Status)
-        if (alive) setStatus(next)
+        if (alive) setStatus(response as Status)
         // 登记还在 = 发送后正在建工作树,Host 落地成功才会销掉:追着轮,chip 秒级跟上。
-        landing = next?.arm != null && next.arm.error === undefined
+        landing = response?.arm != null && response.arm.error === undefined
       } catch { /* the next tick retries */ }
       if (alive) timer = setTimeout(poll, burst && landing ? 1200 : 8000)
     }
@@ -466,6 +478,28 @@ function useAnchorDismiss(menuOpen: boolean, chipRef: { current: HTMLElement | n
 
 // 顶行(新会话)模式 chip:菜单只有「本地模式 / Worktree 模式」两项。选择只登记待发送意图(arm),
 // Host 在该会话首条消息进 inbox 时才建 worktree 并把会话生效目录原地切过去——不建工作区、不切会话。
+// 模式按工作区记忆(localStorage):上次选了 Worktree 模式,之后这个工作区的新会话自动预挂同款。
+function modeMemoryKey(cwd: string) {
+  return `qwt-mode:${cwd}`
+}
+
+function readModeMemory(cwd: string | undefined): "local" | "worktree" | undefined {
+  if (!cwd) return undefined
+  try {
+    const value = localStorage.getItem(modeMemoryKey(cwd))
+    return value === "local" || value === "worktree" ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function writeModeMemory(cwd: string | undefined, mode: "local" | "worktree") {
+  if (!cwd) return
+  try {
+    localStorage.setItem(modeMemoryKey(cwd), mode)
+  } catch { /* 隐身模式等存不了就算了 */ }
+}
+
 function ModeChip(props: {
   api: ReturnType<typeof createApi>
   sessionId?: string
@@ -494,7 +528,22 @@ function ModeChip(props: {
   const repo = status?.repo === true
   const inWorktree = worktreeOf(status, cwd) !== undefined
   const armed = status?.arm?.mode
-  const worktreeMode = armed === "worktree" ? true : armed === "local" ? false : inWorktree
+  // 优先级:本会话已登记的 arm > 生效目录事实 > 工作区记忆 > 本地模式。
+  const worktreeMode = armed === "worktree" ? true : armed === "local" ? false : inWorktree ? true : readModeMemory(cwd) === "worktree"
+
+  // 工作区记忆是 Worktree 模式、本会话还没登记任何意图、探测也齐了:静默补一次 arm,
+  // 让「点发送就落地」的链路对默认模式同样生效。只在缺意图时打一次,失败不打扰。
+  const autoArmed = useRef(false)
+  useEffect(() => {
+    if (autoArmed.current) return
+    if (!repo || armed !== undefined || !cwd || !status?.branch) return
+    if (readModeMemory(cwd) !== "worktree") return
+    autoArmed.current = true
+    // armSession 返回的就是 arm 对象本身(与手动路径一致),直接并进状态。
+    api.arm(sessionId, { cwd, mode: "worktree", ref: status.branch, carry: true }).then((next) => {
+      onArm(next as Status["arm"])
+    }).catch(() => { autoArmed.current = false })
+  }, [api, sessionId, cwd, repo, armed, status?.branch, onArm])
 
   // 与宿主工作区下拉一致,默认贴在 chip 下方;底部放不下且上方有空间时才向上翻。
   function anchorBelow() {
@@ -530,6 +579,7 @@ function ModeChip(props: {
   }
 
   function goLocal() {
+    writeModeMemory(cwd, "local")
     if (worktreeMode) void arm("local")
     else setMenuOpen(false)
   }
@@ -537,6 +587,7 @@ function ModeChip(props: {
   function pickWorktreeMode() {
     if (!repo || worktreeMode || !status?.branch) return
     // 默认等同分支菜单的「本地文件状态」:当前分支 + 把未提交改动一起带进任务空间(carry)。
+    writeModeMemory(cwd, "worktree")
     void arm("worktree", { ref: status.branch, carry: true })
   }
 
@@ -632,7 +683,7 @@ function BranchChip(props: {
       ref={chipRef}
       className="qwt-chip"
       data-open={String(menuOpen)}
-      title={cwd}
+      title={status?.workingPath ?? cwd}
       onPointerEnter={() => { loadBranches(api, cwd, true)?.catch(() => { /* 菜单里还会再试 */ }) }}
       onClick={() => (menuOpen ? setMenuOpen(false) : openMenu())}
     >
@@ -679,7 +730,20 @@ function HeroBar(props: {
   }, [patchArm])
   if (sessionId === undefined) return null
   // 不是 Git 仓库(或还没探出来)就不占顶行位置。
-  if (status?.repo !== true) return null
+  if (status?.repo !== true) {
+    // 例外:工作区记忆是 Worktree 模式,探测还没回来——从创建起就显示加载圈,
+    // 而不是空着等 status 回来再闪一下 main(用户 m03147:m03179)。
+    if (status === undefined && readModeMemory(cwd) === "worktree") {
+      return (
+        <div className="qwt-pair">
+          <div className="qwt-chip qwt-static" title={cwd}>
+            <span className="qwt-glyph"><IconSpinner /></span>
+          </div>
+        </div>
+      )
+    }
+    return null
+  }
   return (
     <div className="qwt-pair">
       <ModeChip api={api} sessionId={sessionId} status={status} cwd={cwd} onArm={onArm} />
@@ -707,9 +771,24 @@ function SessionBar(props: {
   const label = worktree
     ? basename(worktree.path)
     : repo && status?.branch ? status.branch : "本地模式"
+  // 发送后 Host 正在建任务空间:只显示加载圈(宿主同款),建完再出现分支/空间名。
+  // status 还没回来时不能干等:工作区记忆是 worktree(或已登记 arm)就从圈起步,
+  // 否则会先闪一下分支名(main)再变圈——用户要求创建会话起就是加载。
+  const armPending = status?.arm?.mode === "worktree" && status.arm.error === undefined
+  const presumed = status === undefined && readModeMemory(cwd) === "worktree"
+  const landing = worktree === undefined && (armPending || presumed)
+  // 悬停显示会话当前生效目录:切进任务空间后就是 worktree 路径,没切过是主树 cwd。
+  const title = status?.workingPath ?? cwd
+  if (landing) {
+    return (
+      <div className="qwt-chip qwt-static" title={title}>
+        <span className="qwt-glyph"><IconSpinner /></span>
+      </div>
+    )
+  }
   return (
-    <div className="qwt-chip qwt-static" title={cwd}>
-      {/* 会话中固定用 Qoder 状态栏那个分支图标(用户特写 m04725);带/不带未提交的区分只留在新会话顶行。 */}
+    <div className="qwt-chip qwt-static" title={title}>
+      {/* 会话中固定用 Qoder 状态栏那个分支图标(用户特写 m04725)。 */}
       <span className="qwt-glyph"><IconBranchPlain /></span>
       <span>{label}</span>
     </div>
@@ -721,6 +800,7 @@ export const QoderWorktreePlugin = {
   inject: ["slots", "connection"],
   apply(ctx: ClientContext & Record<string, any>) {
     ctx.effect(installStyles, "dsh-qoder-worktree styles")
+    // D 方案:会话原地切,不新建会话,也就没有跳转;navigate 不再需要。
     const api = createApi(ctx.connection)
 
     ctx.slots.inject("conversation.hero.options", () => ctx.slots.register(

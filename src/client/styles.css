@@ -5,6 +5,13 @@
 .qwt-glyph{flex:none;display:inline-flex;color:var(--dsw-alias-label-primary,#222)}
 .qwt-static .qwt-glyph{color:var(--dsw-alias-label-secondary,#9a9a9a)}
 .qwt-glyph svg{width:14px;height:14px}
+/* 任务空间创建中的加载圈:照搬宿主 state-dot spinner(_spinner_1i3xo 系,轨道环+旋转弧段)。 */
+.qwt-spinner{flex:none;color:var(--dsw-alias-label-tertiary,#9a9a9a);animation:qwt-spin 1.5s linear infinite;transform-origin:center}
+.qwt-spinner .qwt-spin-track,.qwt-spinner .qwt-spin-arc{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.qwt-spinner .qwt-spin-track{opacity:.25}
+.qwt-spinner .qwt-spin-arc{stroke-dasharray:12 150;animation:qwt-dash 1.5s ease-in-out infinite}
+@keyframes qwt-spin{to{transform:rotate(360deg)}}
+@keyframes qwt-dash{0%{stroke-dasharray:12 150;stroke-dashoffset:0}50%{stroke-dasharray:24 150;stroke-dashoffset:-6}to{stroke-dasharray:12 150;stroke-dashoffset:0}}
 .qwt-caret{flex:none;display:inline-flex;color:var(--dsw-alias-label-caption,#9a9a9a)}
 .qwt-caret svg{width:14px;height:14px}
 /* 菜单骨架对齐宿主模型下拉( _9r0rkG_menu ):flex 列、padding 4px、宽高上下限、内部列表滚动。 */

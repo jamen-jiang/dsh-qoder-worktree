@@ -7,12 +7,19 @@
  * envelope the Connection package's rpc.call expects.
  *
  * 隔离目录用原生 `git worktree add`(与 Qoder/WorkBuddy 一致:会在仓库 .git/
- * worktrees/ 下留注册目录)。会话切目录走 working-directory/change 投影,
- * 会话本身不搬工作区、不新建 Workspace。
+ * worktrees/ 下留注册目录)。
+ *
+ * Worktree 模式在发送那一刻先建好任务空间,然后**原地**把当前会话切过去:
+ * 会话不换、消息不搬、侧栏分组不变。受限令牌由一个"工作区能力 SID"把关
+ * (从 header.cwd 哈希而来,宿主按它给工作区根发 ACE),插件用同一条算法
+ * 算出会话的 SID,给任务空间目录补一条同名 ACE,沙箱立即放行该目录。
+ * 代价:主树仍是本会话可写的(那条 SID 是整个工作区共用的,撤了会伤及无辜)。
+ * 任一步异常 = 报错、不切目录,消息照常在老会话(主树)里跑。
+ * 「本地模式」回主树同样是原地软切换(working-directory/change 投影)。
  */
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
@@ -25,6 +32,19 @@ const STATE_PATH = join(homedir(), '.dsh', 'qoder-worktree', 'sessions.json')
 // 会话 → 待发送意图(arm):切模式/选分支只登记,首条消息进 inbox(agent 真正开跑)时才建 worktree 并切目录。
 const ARMS_PATH = join(homedir(), '.dsh', 'qoder-worktree', 'arms.json')
 const WORKTREES_ROOT = join(homedir(), '.dsh', 'Worktrees')
+// 诊断流水:默认关闭,设环境变量 DSH_QWT_TRACE=1 才写(~/.dsh/qoder-worktree/trace.log)。
+// 切换这条链路(客户端登记 → pre-step 拦截 → 落地结果)出问题时再开着复现。
+const TRACE_ENABLED = process.env.DSH_QWT_TRACE === '1'
+const TRACE_PATH = join(homedir(), '.dsh', 'qoder-worktree', 'trace.log')
+
+function trace(event, data) {
+  if (!TRACE_ENABLED) return
+  try {
+    // 只留最近一截,免得跑几个月把日志写成巨型文件。
+    if (existsSync(TRACE_PATH) && statSync(TRACE_PATH).size > 256 * 1024) writeFileSync(TRACE_PATH, '')
+    appendFileSync(TRACE_PATH, `${new Date().toISOString()} ${event} ${JSON.stringify(data ?? {})}\n`, 'utf8')
+  } catch { /* 诊断不能把主流程带崩 */ }
+}
 
 const ok = (value) => ({ ok: true, value })
 const fail = (message) => ({ ok: false, message })
@@ -77,6 +97,13 @@ function writeArms(entry) {
     mkdirSync(dirname(ARMS_PATH), { recursive: true })
     writeFileSync(ARMS_PATH, JSON.stringify(entry, null, 2), 'utf8')
   } catch { /* 同 sessions.json:缓存而已 */ }
+}
+
+function clearArm(sessionId) {
+  const arms = readArms()
+  if (arms[sessionId] === undefined) return
+  delete arms[sessionId]
+  writeArms(arms)
 }
 
 /**
@@ -360,6 +387,8 @@ async function applyWorking(agent, path) {
 /**
  * 当前会话原地指向 path(worktree 或主树):不建工作区、不切会话。
  * Agent 已存在立即生效;空会话登记进表,agent/created 时补写(发送那一刻才建 Agent)。
+ * 指向的目录若不是会话根,同样补一条 ACE 放行——手动「指向 worktree」和发送时自动切
+ * 走的是同一条沙箱规则,不扩权的话切过去也写不进。
  */
 async function pointSession(sessionId, path) {
   if (!sessionId) throw new Error('缺少 sessionId。')
@@ -370,8 +399,15 @@ async function pointSession(sessionId, path) {
     writeStore(entry)
     return { deferred: false, missing: true }
   }
+  const grantIfNeeded = async (agent) => {
+    const root = String(agent.session.header?.cwd ?? '')
+    if (!root || canonical(root) === canonical(path)) return
+    const grant = await grantWrite(capabilitySid(root), path)
+    if (!grant.ok) throw new Error(`给目标目录放行写入失败：${grant.message}`)
+  }
   const agent = ctx.agents.get(sessionId)
   if (agent !== undefined) {
+    await grantIfNeeded(agent)
     await applyWorking(agent, path)
     delete entry[sessionId]
     writeStore(entry)
@@ -414,35 +450,106 @@ function cancelArm(sessionId) {
   return { cancelled: true }
 }
 
-/** 发送那一刻落地:建 worktree(或回主树)并把会话生效目录原地切过去。 */
-async function consumeArm(agent) {
-  const arms = readArms()
-  const arm = arms[agent.session.id]
-  if (arm === undefined) return
-  // 登记先留着:它存在=「正在落地」,客户端据此短周期轮询,落地后 chip 秒级更新。
+/**
+ * 会话的能力 SID:宿主沙箱从 header.cwd 原文哈希出这个 SID 发 ACE
+ * (sandboxPolicy.resolve 用 resolveWorkspaceRoot(header.cwd) 原样透传,
+ * 所以这里必须用同一字段原文,不能归一化大小写或斜杠)。
+ */
+function capabilitySid(rootPath) {
+  const digest = createHash('sha256').update(rootPath, 'utf8').digest()
+  return `S-1-4-${digest.readUInt32LE(0) % (2 ** 30 - 1) + 1}-${digest.readUInt32LE(4) % (2 ** 30 - 1) + 1}`
+}
+
+/**
+ * 给 targetPath 补一条 ACE:允许会话的 capability SID 写入(OI+CI,Modify)。
+ * 宿主进程不受沙箱限制,直接 PowerShell Set-Acl;icacls 不认 S-1-4- 合成 SID
+ * (LookupAccountSid 无法映射),只能走 .NET。
+ */
+function grantWrite(sid, targetPath) {
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    `$sid = New-Object System.Security.Principal.SecurityIdentifier('${sid}')`,
+    `$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')`,
+    `$acl = Get-Acl -LiteralPath '${targetPath}'`,
+    '$acl.AddAccessRule($rule)',
+    `Set-Acl -LiteralPath '${targetPath}' -AclObject $acl`,
+    '"QWT-ACE-OK"',
+  ].join('; ')
+  return new Promise((resolvePromise) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { timeout: 20000, windowsHide: true }, (error, stdout) => {
+        if (error) resolvePromise({ ok: false, message: String(error.message ?? error).trim() })
+        else resolvePromise({ ok: String(stdout).includes('QWT-ACE-OK'), message: String(stdout).trim() })
+      })
+  })
+}
+
+/**
+ * 发送那一刻落地(agent/pre-step,模型请求之前)。
+ * 永远 return false = 消息照常进模型:这里只负责把会话**原地**切到任务空间并放行写入。
+ * 任何异常 = 报错、不切目录,消息照常在老会话(主树)里跑。
+ */
+async function landArm(agent, messages) {
+  const sessionId = agent.session.id
+  const arm = readArms()[sessionId]
+  if (arm === undefined) return false
+  const root = String(agent.session.header?.cwd ?? '')
+  trace('landArm', { sessionId, arm, root, messages: messages.length })
   try {
     if (arm.mode === 'local') {
+      // 回主树:主树本来就是老会话的根,原地指一下就够,不用新开会话。
       const status = await repoStatus(arm.cwd)
       if (status.mainToplevel) await applyWorking(agent, status.mainToplevel)
-    } else {
-      const created = arm.newBranch
-        ? await createBranch(arm.cwd, arm.newBranch)
-        : await createWorktreeFromBranch(arm.cwd, arm.ref, arm.carry === true
-          ? { carry: true, from: await currentWorkingDir(arm.cwd, agent.session.id) }
-          : undefined)
-      await applyWorking(agent, created.path)
+      clearArm(sessionId)
+      trace('landArm.local-in-place', { sessionId, to: status.mainToplevel })
+      return false
     }
-    // 落地成功才销登记。
-    const landed = readArms()
-    delete landed[agent.session.id]
-    writeArms(landed)
+    let target
+    if (arm.newBranch) {
+      target = (await createBranch(arm.cwd, arm.newBranch)).path
+    } else {
+      // 该分支的任务空间工作树已经就是这个会话的根:原地跑,别开重复会话。
+      // 必须排除主检出目录——`git worktree list` 第一条就是主树,分支名当然也等于它,
+      // 不排除的话"Worktree 模式 + 当前分支"会被误判成已经在任务空间里,永远不建新会话。
+      const status = await repoStatus(arm.cwd)
+      const mainPath = status.mainToplevel === undefined ? undefined : canonical(status.mainToplevel)
+      const already = status.worktrees?.find((item) => item.branch === arm.ref
+        && root && canonical(item.path) === canonical(root)
+        && (mainPath === undefined || canonical(item.path) !== mainPath))
+      target = already !== undefined
+        ? already.path
+        : (await createWorktreeFromBranch(arm.cwd, arm.ref, arm.carry === true
+          ? { carry: true, from: await currentWorkingDir(arm.cwd, sessionId) }
+          : undefined)).path
+    }
+    if (typeof target !== 'string' || !isAbsolute(target) || !existsSync(target)) {
+      throw new Error(`任务空间目录不可用：${String(target)}`)
+    }
+    if (root && canonical(root) === canonical(target)) {
+      await applyWorking(agent, target)
+      clearArm(sessionId)
+      trace('landArm.same-root-in-place', { sessionId, target })
+      return false
+    }
+    // 原地切换三步:放行写入 → 改投影 → 清登记。沙箱的 workspaceRoot 是 header.cwd(主树),
+    // 补的这条 ACE 让受限令牌也认得任务空间目录;会话分组、消息历史全部原地不动。
+    const sid = capabilitySid(root)
+    const grant = await grantWrite(sid, target)
+    if (!grant.ok) throw new Error(`给任务空间放行写入失败：${grant.message}`)
+    await applyWorking(agent, target)
+    clearArm(sessionId)
+    trace('landArm.in-place', { sessionId, target, sid })
+    console.log(`[qwt] 已原地切入任务空间：${sessionId} → ${target}`)
+    return false
   } catch (error) {
     const message = String(error?.message ?? error)
-    console.warn('[qwt] 发送时切入 Worktree 失败:', error)
-    // 失败必须看得见:把原因写回登记(repoStatus 会带出来给菜单),用户换一项就覆盖掉。
+    trace('landArm.error', { sessionId, message, stack: String(error?.stack ?? '').split('\n').slice(0, 4).join(' | ') })
+    console.warn('[qwt] 发送时切入任务空间失败:', error)
+    // 失败必须看得见:原因写回登记(repoStatus 会带出来给菜单),用户换一项就覆盖掉。
     const latest = readArms()
-    latest[agent.session.id] = { ...(latest[agent.session.id] ?? arm), error: message }
+    latest[sessionId] = { ...(latest[sessionId] ?? arm), error: message }
     writeArms(latest)
+    return false
   }
 }
 
@@ -455,7 +562,21 @@ async function currentWorkingDir(cwd, sessionId) {
 }
 
 async function handle(endpoint, payload) {
-  if (endpoint === 'status') return ok(await repoStatus(String(payload.cwd ?? ''), String(payload.sessionId ?? '')))
+  // status 是 8 秒一轮的轮询,不记;其余登记类调用必须留痕,否则分不清"没选 Worktree"还是"选了没送到"。
+  if (endpoint !== 'status') {
+    trace(`rpc:${endpoint}`, {
+      sessionId: payload?.sessionId,
+      cwd: payload?.cwd,
+      mode: payload?.mode,
+      ref: payload?.ref,
+      newBranch: payload?.newBranch,
+      carry: payload?.carry,
+      path: payload?.path,
+    })
+  }
+  if (endpoint === 'status') {
+    return ok(await repoStatus(String(payload.cwd ?? ''), String(payload.sessionId ?? '')))
+  }
   if (endpoint === 'create') return ok(await createWorktree(String(payload.cwd ?? ''), payload.name))
   if (endpoint === 'remove') return ok(await removeWorktree(String(payload.cwd ?? ''), payload.path))
   if (endpoint === 'branches') return ok(await listBranches(String(payload.cwd ?? '')))
@@ -480,12 +601,43 @@ export function apply(hostCtx) {
     delete entry[agent.session.id]
     writeStore(entry)
     if (!existsSync(target)) return
-    return applyWorking(agent, target).catch((error) => console.warn('[qwt] 切入 worktree 失败:', error))
+    // 与 pointSession 同规:目标目录不是会话根就先补 ACE,否则切过去也写不进。
+    return (async () => {
+      const root = String(agent.session.header?.cwd ?? '')
+      if (root && canonical(root) !== canonical(target)) {
+        const grant = await grantWrite(capabilitySid(root), target)
+        if (!grant.ok) throw new Error(`给目标目录放行写入失败：${grant.message}`)
+      }
+      await applyWorking(agent, target)
+    })().catch((error) => console.warn('[qwt] 切入 worktree 失败:', error))
   }), 'dsh-qoder-worktree agent/created')
-  // 待发送意图(arm):消息进 inbox = 用户点了发送,这一刻才建 worktree / 回主树并切生效目录。
-  ctx.effect(() => ctx.on('agent/inbox/inserted', ({ agent }) => {
-    void consumeArm(agent)
-  }), 'dsh-qoder-worktree agent/inbox/inserted')
+  // 待发送意图(arm)在 pre-step 落地:模型请求之前,批次已从 inbox claimed 出来,
+  // 所以成功就返回空消息让这条 turn 干净收尾(不进模型、不报错);失败必须 return next()
+  // 让默认处理器把 claimed 放回去 —— 消息绝不会丢。
+  ctx.effect(() => ctx.on('agent/pre-step', async (payload, next) => {
+    const agent = payload?.agent
+    const sessionId = agent?.session?.id
+    const armed = sessionId === undefined ? undefined : readArms()[sessionId]
+    if (armed === undefined) return next()
+    // 有登记却没这行 = 钩子没被调用;有这行但 step 不是 1 = 拦截点不对。
+    trace('pre-step', {
+      sessionId,
+      step: payload?.step,
+      armed,
+      userMessages: Array.isArray(payload?.messages) ? payload.messages.filter((item) => item?.role === 'user').length : -1,
+    })
+    if (payload.step !== 1) return next()
+    const messages = Array.isArray(payload.messages) ? payload.messages : []
+    const mine = messages.filter((item) => item?.role === 'user')
+    if (mine.length === 0) return next()
+    const handed = await landArm(agent, mine).catch((error) => {
+      trace('pre-step.unexpected', { sessionId, message: String(error?.message ?? error) })
+      console.warn('[qwt] 落地未预期异常:', error)
+      return false
+    })
+    if (!handed) return next()
+    return { kind: 'enter', messages: [] }
+  }), 'dsh-qoder-worktree agent/pre-step')
   // 新版 connection.fetch 要精确 HTTP 路由 {path, methods, requestBody, fetch};
   // 旧版 {request, handler} 会在 assertFetchRoute 里对 undefined 的 path 调 startsWith 直接炸。
   for (const endpoint of ENDPOINTS) {
